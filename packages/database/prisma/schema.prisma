@@ -1,0 +1,527 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// PriceLens Nigeria — Complete Database Schema
+// ═══════════════════════════════════════════════════════════════════════════════
+// Covers: Users, Auth, Locations (States/Cities), Stores, Products, Prices,
+//         Shopping Lists, Expenses, Subscriptions, Notifications, Receipt Scans
+// ═══════════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+  RETAILER
+}
+
+enum Region {
+  SOUTH_WEST
+  SOUTH_EAST
+  SOUTH_SOUTH
+  NORTH_CENTRAL
+  NORTH_WEST
+  NORTH_EAST
+}
+
+enum StoreType {
+  SUPERMARKET
+  OPEN_MARKET
+  ONLINE
+}
+
+enum PriceSource {
+  MANUAL        // Admin entered
+  SCRAPER       // Web scraping
+  RECEIPT_SCAN  // User receipt OCR
+  COMMUNITY     // User-submitted
+  RETAILER      // Store/retailer feed
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  PAST_DUE
+}
+
+enum PaymentInterval {
+  MONTHLY
+  ANNUAL
+}
+
+enum NotificationType {
+  PRICE_ALERT
+  PRICE_DROP
+  SUBSCRIPTION
+  SYSTEM
+  WELCOME
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  APPLE
+  PHONE
+}
+
+// ── Location Models ─────────────────────────────────────────────────────────
+
+model State {
+  id        String   @id @default(cuid())
+  name      String   @unique              // "Lagos"
+  slug      String   @unique              // "lagos"
+  code      String   @unique              // "LA"
+  region    Region                        // SOUTH_WEST
+  capital   String                        // "Ikeja"
+  lat       Float?
+  lng       Float?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+
+  cities    City[]
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("states")
+}
+
+model City {
+  id         String  @id @default(cuid())
+  name       String                       // "Ikeja"
+  slug       String                       // "ikeja"
+  stateId    String
+  state      State   @relation(fields: [stateId], references: [id], onDelete: Cascade)
+  lat        Float?
+  lng        Float?
+  population Int?                         // For sorting priority
+  isActive   Boolean @default(true)
+  sortOrder  Int     @default(0)
+
+  stores    Store[]
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([slug, stateId])
+  @@map("cities")
+}
+
+// ── User & Auth Models ──────────────────────────────────────────────────────
+
+model User {
+  id             String       @id @default(cuid())
+  email          String?      @unique
+  phone          String?      @unique
+  passwordHash   String?
+  firstName      String?
+  lastName       String?
+  displayName    String?
+  avatar         String?                  // S3 URL
+  role           Role         @default(USER)
+  authProvider   AuthProvider @default(EMAIL)
+  isVerified     Boolean      @default(false)
+  isActive       Boolean      @default(true)
+
+  // Location preferences
+  stateId        String?
+  state          State?       @relation(fields: [stateId], references: [id])
+  cityId         String?
+  city           City?        @relation(fields: [cityId], references: [id])
+
+  // Relations
+  accounts       Account[]
+  subscription   Subscription?
+  shoppingLists  ShoppingList[]
+  expenses       Expense[]
+  priceAlerts    PriceAlert[]
+  pricesReported Price[]       @relation("ReportedPrices")
+  receiptScans   ReceiptScan[]
+  notifications  Notification[]
+
+  lastLoginAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@map("users")
+}
+
+model Account {
+  id                String       @id @default(cuid())
+  userId            String
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider          AuthProvider
+  providerAccountId String                  // Google ID, Apple ID, etc.
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         Int?
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  isRevoked Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model OtpCode {
+  id        String   @id @default(cuid())
+  phone     String?
+  email     String?
+  code      String                        // 6-digit code
+  purpose   String                        // "login", "verify", "reset"
+  expiresAt DateTime
+  isUsed    Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([phone, purpose])
+  @@index([email, purpose])
+  @@map("otp_codes")
+}
+
+// ── Store Models ────────────────────────────────────────────────────────────
+
+model Store {
+  id          String    @id @default(cuid())
+  name        String                       // "Shoprite Ikeja Mall"
+  slug        String    @unique
+  type        StoreType                    // SUPERMARKET, OPEN_MARKET, ONLINE
+  description String?
+  address     String?
+  cityId      String
+  city        City      @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  lat         Float?
+  lng         Float?
+  phone       String?
+  email       String?
+  website     String?
+  openingTime String?                      // "08:00"
+  closingTime String?                      // "21:00"
+  marketDays  String?                      // "Daily" or "Mon,Wed,Fri,Sat" for periodic markets
+  logo        String?                      // S3 URL
+  coverImage  String?                      // S3 URL
+  isVerified  Boolean   @default(false)
+  isActive    Boolean   @default(true)
+
+  prices      Price[]
+  expenses    Expense[]
+  receiptScans ReceiptScan[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([cityId])
+  @@index([type])
+  @@map("stores")
+}
+
+// ── Product & Category Models ───────────────────────────────────────────────
+
+model Category {
+  id       String     @id @default(cuid())
+  name     String                          // "Grains & Cereals"
+  slug     String     @unique              // "grains-cereals"
+  icon     String?                         // Lucide icon name
+  image    String?                         // S3 URL
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  sortOrder Int       @default(0)
+  isActive Boolean    @default(true)
+
+  products Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String                       // "Golden Penny Spaghetti 500g"
+  slug        String   @unique             // "golden-penny-spaghetti-500g"
+  description String?
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  brand       String?                      // "Golden Penny"
+  unit        String                       // "500g", "1kg", "per piece", "per derica"
+  barcode     String?  @unique
+  image       String?                      // S3 URL
+  isActive    Boolean  @default(true)
+
+  prices          Price[]
+  shoppingItems   ShoppingListItem[]
+  expenseItems    ExpenseItem[]
+  priceAlerts     PriceAlert[]
+  receiptItems    ReceiptItem[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([categoryId])
+  @@index([name])
+  @@map("products")
+}
+
+// ── Price Models ────────────────────────────────────────────────────────────
+
+model Price {
+  id         String      @id @default(cuid())
+  productId  String
+  product    Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  storeId    String
+  store      Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  amount     Decimal     @db.Decimal(12, 2) // Price in Naira
+  currency   String      @default("NGN")
+  source     PriceSource @default(MANUAL)
+  reportedBy String?                        // userId who reported
+  reporter   User?       @relation("ReportedPrices", fields: [reportedBy], references: [id])
+  isVerified Boolean     @default(false)
+  verifiedAt DateTime?
+  confidence Float?      @default(1.0)      // 0.0–1.0 confidence score for scraped/OCR data
+
+  priceHistory PriceHistory[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([productId, storeId])            // One current price per product per store
+  @@index([storeId])
+  @@index([productId])
+  @@index([amount])
+  @@map("prices")
+}
+
+model PriceHistory {
+  id        String   @id @default(cuid())
+  priceId   String
+  price     Price    @relation(fields: [priceId], references: [id], onDelete: Cascade)
+  amount    Decimal  @db.Decimal(12, 2)
+  source    PriceSource @default(MANUAL)
+  recordedAt DateTime @default(now())
+
+  @@index([priceId, recordedAt])
+  @@map("price_history")
+}
+
+// ── Shopping List Models ────────────────────────────────────────────────────
+
+model ShoppingList {
+  id        String   @id @default(cuid())
+  name      String                          // "Weekly Groceries"
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isShared  Boolean  @default(false)
+  shareCode String?  @unique                // For sharing lists
+
+  items     ShoppingListItem[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("shopping_lists")
+}
+
+model ShoppingListItem {
+  id             String       @id @default(cuid())
+  shoppingListId String
+  shoppingList   ShoppingList @relation(fields: [shoppingListId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product      @relation(fields: [productId], references: [id])
+  quantity       Int          @default(1)
+  unit           String?                     // Override product unit if needed
+  isChecked      Boolean      @default(false)
+  notes          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shoppingListId, productId])
+  @@map("shopping_list_items")
+}
+
+// ── Expense Models ──────────────────────────────────────────────────────────
+
+model Expense {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeId    String?
+  store      Store?   @relation(fields: [storeId], references: [id])
+  totalAmount Decimal @db.Decimal(12, 2)
+  date       DateTime @default(now())
+  notes      String?
+  receiptUrl String?                        // S3 URL of receipt image
+
+  items     ExpenseItem[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([date])
+  @@map("expenses")
+}
+
+model ExpenseItem {
+  id        String  @id @default(cuid())
+  expenseId String
+  expense   Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id])
+  name      String                          // In case product not in DB yet
+  quantity  Int     @default(1)
+  unitPrice Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@map("expense_items")
+}
+
+// ── Receipt Scanning ────────────────────────────────────────────────────────
+
+model ReceiptScan {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeId     String?
+  store       Store?   @relation(fields: [storeId], references: [id])
+  imageUrl    String                        // S3 URL of receipt image
+  status      String   @default("pending")  // "pending", "processing", "completed", "failed"
+  rawText     String?                       // OCR extracted text
+  parsedData  Json?                         // Structured parsed result
+  storeName   String?                       // OCR-detected store name
+  totalAmount Decimal? @db.Decimal(12, 2)
+  receiptDate DateTime?
+  confidence  Float?                        // Overall OCR confidence
+
+  items       ReceiptItem[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@map("receipt_scans")
+}
+
+model ReceiptItem {
+  id            String      @id @default(cuid())
+  receiptScanId String
+  receiptScan   ReceiptScan @relation(fields: [receiptScanId], references: [id], onDelete: Cascade)
+  rawName       String                      // As read from receipt
+  matchedProductId String?
+  matchedProduct   Product? @relation(fields: [matchedProductId], references: [id])
+  quantity      Int        @default(1)
+  unitPrice     Decimal    @db.Decimal(12, 2)
+  confidence    Float?                      // Match confidence
+
+  createdAt DateTime @default(now())
+
+  @@map("receipt_items")
+}
+
+// ── Price Alerts ────────────────────────────────────────────────────────────
+
+model PriceAlert {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  targetPrice Decimal  @db.Decimal(12, 2)   // Alert when price drops below this
+  isActive    Boolean  @default(true)
+  triggeredAt DateTime?                     // Last time alert fired
+  triggerCount Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@map("price_alerts")
+}
+
+// ── Subscription & Payment Models ───────────────────────────────────────────
+
+model Subscription {
+  id              String             @id @default(cuid())
+  userId          String             @unique
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            SubscriptionPlan   @default(FREE)
+  status          SubscriptionStatus @default(ACTIVE)
+  interval        PaymentInterval?
+  amount          Decimal?           @db.Decimal(12, 2)
+  currency        String             @default("NGN")
+  paystackCustomerCode String?
+  paystackSubscriptionCode String?
+  paystackAuthCode String?
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelledAt        DateTime?
+  gracePeriodEnd     DateTime?        // 3 days after expiry
+
+  payments    Payment[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("subscriptions")
+}
+
+model Payment {
+  id               String   @id @default(cuid())
+  subscriptionId   String
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id])
+  amount           Decimal  @db.Decimal(12, 2)
+  currency         String   @default("NGN")
+  status           String                    // "pending", "success", "failed"
+  paystackRef      String   @unique
+  paystackResponse Json?
+  paidAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([subscriptionId])
+  @@map("payments")
+}
+
+// ── Notification Models ─────────────────────────────────────────────────────
+
+model Notification {
+  id       String           @id @default(cuid())
+  userId   String
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type     NotificationType
+  title    String
+  message  String
+  data     Json?                            // Extra structured data
+  isRead   Boolean          @default(false)
+  readAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
